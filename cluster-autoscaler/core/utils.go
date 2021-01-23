@@ -18,6 +18,10 @@ package core
 
 import (
 	"fmt"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
+	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
+	"k8s.io/kubernetes/pkg/scheduler/algorithm"
 	"math/rand"
 	"reflect"
 	"time"
@@ -209,11 +213,77 @@ func newPodsSchedulableOnNodeChecker(context *context.AutoscalingContext, pods [
 	return &checker
 }
 
+// nodeMatchesNodeSelectorTerms checks if a node's labels satisfy a list of node selector terms,
+// terms are ORed, and an empty list of terms will match nothing.
+func nodeMatchesNodeSelectorTerms(node *apiv1.Node, nodeSelectorTerms []apiv1.NodeSelectorTerm) bool {
+	nodeFields := map[string]string{}
+	for k, f := range algorithm.NodeFieldSelectorKeys {
+		nodeFields[k] = f(node)
+	}
+	klog.V(2).Infof("## nodeMatchesNodeSelectorTerms ----------------------------------------------- [START]")
+	klog.V(2).Infof("## nodeFields: %v", nodeFields)
+	klog.V(2).Infof("## nodeSelectorTerms: %v", nodeSelectorTerms)
+	klog.V(2).Infof("## labels.Set(node.Labels): %v", labels.Set(node.Labels))
+	klog.V(2).Infof("## fields.Set(nodeFields): %v", fields.Set(nodeFields))
+	klog.V(2).Infof("## nodeMatchesNodeSelectorTerms ----------------------------------------------- [END]")
+	return v1helper.MatchNodeSelectorTerms(nodeSelectorTerms, labels.Set(node.Labels), fields.Set(nodeFields))
+}
+
+func fooPodMatchesNodeSelectorAndAffinityTerms(pod *apiv1.Pod, node *apiv1.Node) bool {
+	klog.V(2).Infof("##")
+	// Check if node.Labels match pod.Spec.NodeSelector.
+	if len(pod.Spec.NodeSelector) > 0 {
+		selector := labels.SelectorFromSet(pod.Spec.NodeSelector)
+		if !selector.Matches(labels.Set(node.Labels)) {
+			return false
+		}
+	}
+	klog.V(2).Infof("##")
+	// 1. nil NodeSelector matches all nodes (i.e. does not filter out any nodes)
+	// 2. nil []NodeSelectorTerm (equivalent to non-nil empty NodeSelector) matches no nodes
+	// 3. zero-length non-nil []NodeSelectorTerm matches no nodes also, just for simplicity
+	// 4. nil []NodeSelectorRequirement (equivalent to non-nil empty NodeSelectorTerm) matches no nodes
+	// 5. zero-length non-nil []NodeSelectorRequirement matches no nodes also, just for simplicity
+	// 6. non-nil empty NodeSelectorRequirement is not allowed
+	nodeAffinityMatches := true
+	affinity := pod.Spec.Affinity
+	if affinity != nil && affinity.NodeAffinity != nil {
+		nodeAffinity := affinity.NodeAffinity
+		// if no required NodeAffinity requirements, will do no-op, means select all nodes.
+		// TODO: Replace next line with subsequent commented-out line when implement RequiredDuringSchedulingRequiredDuringExecution.
+		if nodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+			// if nodeAffinity.RequiredDuringSchedulingRequiredDuringExecution == nil && nodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+			return true
+		}
+
+		// Match node selector for requiredDuringSchedulingRequiredDuringExecution.
+		// TODO: Uncomment this block when implement RequiredDuringSchedulingRequiredDuringExecution.
+		// if nodeAffinity.RequiredDuringSchedulingRequiredDuringExecution != nil {
+		// 	nodeSelectorTerms := nodeAffinity.RequiredDuringSchedulingRequiredDuringExecution.NodeSelectorTerms
+		// 	klog.V(10).Infof("Match for RequiredDuringSchedulingRequiredDuringExecution node selector terms %+v", nodeSelectorTerms)
+		// 	nodeAffinityMatches = nodeMatchesNodeSelectorTerms(node, nodeSelectorTerms)
+		// }
+
+		// Match node selector for requiredDuringSchedulingIgnoredDuringExecution.
+		if nodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution != nil {
+			nodeSelectorTerms := nodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+			klog.V(2).Infof("Match for RequiredDuringSchedulingIgnoredDuringExecution node selector terms %+v", nodeSelectorTerms)
+
+			isMatched := nodeMatchesNodeSelectorTerms(node, nodeSelectorTerms)
+			klog.V(2).Infof("## nodeAffinityMatches: %v, nodeMatchesNodeSelectorTerms: %v", nodeAffinityMatches, isMatched)
+			nodeAffinityMatches = nodeAffinityMatches && isMatched
+		}
+		klog.V(2).Infof("##")
+	}
+	klog.V(2).Infof("##")
+	return nodeAffinityMatches
+}
+
 // checkPodsSchedulableOnNode checks if pods can be scheduled on the given node.
 func (c *podsSchedulableOnNodeChecker) checkPodsSchedulableOnNode(nodeGroupId string, nodeInfo *schedulernodeinfo.NodeInfo) map[*apiv1.Pod]*simulator.PredicateError {
 	loggingQuota := glogx.PodsLoggingQuota()
 	schedulingErrors := make(map[equivalenceGroupId]*simulator.PredicateError)
-
+	glogx.V(2).UpTo(loggingQuota).Infof("checkPodsSchedulableOnNode")
 	for _, pod := range c.pods {
 		equivalenceGroup := c.podsEquivalenceGroups[pod.UID]
 		err, found := schedulingErrors[equivalenceGroup]
@@ -222,11 +292,19 @@ func (c *podsSchedulableOnNodeChecker) checkPodsSchedulableOnNode(nodeGroupId st
 		}
 		// Not found in cache, have to run the predicates.
 		if !found {
+			klog.V(2).Infof("nodeInfo: %v", nodeInfo)
 			err = c.context.PredicateChecker.CheckPredicates(pod, nil, nodeInfo)
 			schedulingErrors[equivalenceGroup] = err
+			fooPodMatchesNodeSelectorAndAffinityTerms(pod, nodeInfo.Node())
 			if err != nil {
+				klog.V(2).Infof("-------$$ - EEEEEEERRRRR")
 				// Always log for the first pod in a controller.
-				klog.V(2).Infof("Pod %s can't be scheduled on %s, predicate failed: %v", pod.Name, nodeGroupId, err.VerboseError())
+				//klog.V(2).Infof("Pod %s can't be scheduled on %s, predicate failed: %v", pod.Name, nodeGroupId, err.VerboseError())
+				//klog.V(2).Infof("pod: %v", pod)
+				klog.V(2).Infof("-------$$ -")
+				klog.V(2).Infof("node: %v", nodeInfo.Node())
+				fooPodMatchesNodeSelectorAndAffinityTerms(pod, nodeInfo.Node())
+				klog.V(2).Infof("-------$$ -$$$")
 			}
 		}
 	}

@@ -363,6 +363,7 @@ func (p *PredicateChecker) CheckPredicates(pod *apiv1.Pod, predicateMetadata pre
 		}
 
 		match, failureReasons, err := predInfo.Predicate(pod, predicateMetadata, nodeInfo)
+		klog.V(1).Infof("Checking predicate %s, match: %s, err: %v", predInfo.Name, match, err)
 
 		if err != nil || !match {
 			return &PredicateError{

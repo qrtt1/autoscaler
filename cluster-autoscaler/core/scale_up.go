@@ -324,6 +324,7 @@ func ScaleUp(context *context.AutoscalingContext, processors *ca_processors.Auto
 
 	skippedNodeGroups := map[string]status.Reasons{}
 	for _, nodeGroup := range nodeGroups {
+		klog.V(4).Infof("nodeGroups [%s]", nodeGroup.Id())
 		// Autoprovisioned node groups without nodes are created later so skip check for them.
 		if nodeGroup.Exist() && !clusterStateRegistry.IsNodeGroupSafeToScaleUp(nodeGroup, now) {
 			// Hack that depends on internals of IsNodeGroupSafeToScaleUp.
@@ -374,6 +375,7 @@ func ScaleUp(context *context.AutoscalingContext, processors *ca_processors.Auto
 			Pods:      make([]*apiv1.Pod, 0),
 		}
 
+		klog.V(4).Infof("-- -- %v", getPodsPassingPredicates)
 		// add list of pods which pass predicates to option
 		podsPassing, err := getPodsPassingPredicates(nodeGroup.Id())
 		if err != nil {
@@ -384,6 +386,7 @@ func ScaleUp(context *context.AutoscalingContext, processors *ca_processors.Auto
 			option.Pods = make([]*apiv1.Pod, len(podsPassing))
 			copy(option.Pods, podsPassing)
 		}
+		klog.V(4).Infof("after-podsPassing [%s][%d]", nodeGroup.Id(), len(podsPassing))
 
 		// update information why we cannot schedule pods for which we did not find a working extension option so far
 		podsNotPassing, err := getPodsNotPassingPredicates(nodeGroup.Id())
@@ -392,6 +395,7 @@ func ScaleUp(context *context.AutoscalingContext, processors *ca_processors.Auto
 			skippedNodeGroups[nodeGroup.Id()] = notReadyReason
 			continue
 		}
+		klog.V(4).Infof("after-podsNotPassing [%s][%d]", nodeGroup.Id(), len(podsNotPassing))
 
 		// mark that there is a scheduling option for pods which can be scheduled to node from currently analyzed node group
 		for _, pod := range podsPassing {
@@ -581,9 +585,12 @@ func getPodsPredicatePassingCheckFunctions(
 			return
 		}
 
+		klog.V(1).Infof("getPodsPredicatePassingCheckFunctions.computeCaches")
+
 		podsPassing := make([]*apiv1.Pod, 0)
 		podsNotPassing := make(map[*apiv1.Pod]status.Reasons)
 		schedulableOnNode := checker.checkPodsSchedulableOnNode(nodeGroupId, nodeInfo)
+		klog.V(1).Infof("getPodsPredicatePassingCheckFunctions.computeCaches => %d", len(schedulableOnNode))
 		for pod, err := range schedulableOnNode {
 			if err == nil {
 				podsPassing = append(podsPassing, pod)
